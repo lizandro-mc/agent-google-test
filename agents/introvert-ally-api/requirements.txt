@@ -1,0 +1,5 @@
+functions-framework
+flask
+google-cloud-aiplatform
+python-dotenv
+# google-cloud-discoveryengine # Descomenta si usas otras partes del SDK
