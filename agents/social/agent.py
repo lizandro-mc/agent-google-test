@@ -37,7 +37,7 @@ profile_agent = LlmAgent(
 )
 
 summary_agent = LlmAgent(
-    name="summary_agent",
+    name="social_agent",
     model="gemini-2.0-flash",
     description=(
         "Generate a comprehensive social summary as a single, cohesive paragraph. This summary should cover the activities, posts, friend networks, and event participation of one or more individuals. If multiple profiles are analyzed, the paragraph must also identify and integrate any common ground found between them."

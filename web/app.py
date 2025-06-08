@@ -575,9 +575,9 @@ def event_detail_page(event_id):
         flash(f"Failed to load event data: {e}", "danger")
         print(f"Error fetching event {event_id}: {e}")
         traceback.print_exc()
-        return render_template('event_detail.html', event=None, error=True, Maps_api_key=Maps_API_KEY)
+        return render_template('event_detail.html', event=None, error=True, Maps_api_key=Maps_API_KEY, Maps_map_id=Maps_MAP_KEY)
 
-    return render_template('event_detail.html', event=event_data, Maps_api_key=Maps_API_KEY)
+    return render_template('event_detail.html', event=event_data, Maps_api_key=Maps_API_KEY, Maps_map_id=Maps_MAP_KEY)
 
 
 @app.route('/api/posts', methods=['POST'])
