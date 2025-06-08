@@ -3,8 +3,11 @@ import json
 import os
 from dotenv import load_dotenv
 
+
 load_dotenv()
 BASE_URL = os.environ.get("INSTAVIBE_BASE_URL")
+
+
 
 def create_post(author_name: str, text: str, sentiment: str, base_url: str = BASE_URL):
     """
@@ -45,7 +48,7 @@ def create_post(author_name: str, text: str, sentiment: str, base_url: str = BAS
         print(f"Error decoding JSON response from {url}. Response text: {response.text}")
         return None
 
-def create_event(event_name: str, description: str, event_date: str, locations: list, attendee_names: list[str], base_url: str = BASE_URL):
+def create_event(event_name: str, description: str, event_date: str, locations: list[dict], attendee_names: list[str], base_url: str = BASE_URL):
     """
     Sends a POST request to the /events endpoint to create a new event registration.
 
@@ -53,7 +56,7 @@ def create_event(event_name: str, description: str, event_date: str, locations: 
         event_name (str): The name of the event.
         description (str): The detailed description of the event.
         event_date (str): The date and time of the event (ISO 8601 format recommended, e.g., "2025-06-10T09:00:00Z").
-        locations (list): A list of location dictionaries. Each dictionary should contain:
+        locations (list[dict]): A list of location dictionaries. Each dictionary should contain:
                           'name' (str), 'description' (str, optional),
                           'latitude' (float), 'longitude' (float),
                           'address' (str, optional).

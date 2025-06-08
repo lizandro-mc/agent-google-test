@@ -3,7 +3,6 @@ import json
 import traceback 
 from introvertally import call_agent_for_plan, post_plan_event
 
-
 # It's good practice to use a Blueprint for organizing routes
 ally_bp = Blueprint('ally', __name__, template_folder='templates')
 
@@ -15,29 +14,25 @@ def get_all_people_for_ally_page():
     try:
         # Import here to avoid circular dependencies at module load time
         # and ensure app.py's db and run_query are initialized.
-        from app import db as main_app_db, run_query as main_app_run_query
-        # param_types might be needed if run_query is called with params
-        # from google.cloud.spanner_v1 import param_types as main_app_param_types
+        from app import conn as main_app_conn, run_query as main_app_run_query
 
-        if not main_app_db:
-            print("Error in ally_routes.get_all_people_for_ally_page: main_app_db is not available from app.py.")
+        if main_app_conn is None or main_app_conn.closed:
+            print("Error in ally_routes.get_all_people_for_ally_page: main_app_conn is not available or closed from app.py.")
             return [] # Return empty list if db connection failed
 
         sql = """
             SELECT person_id, name
             FROM Person
-            ORDER BY name
+            ORDER BY name;
         """
-        fields = ["person_id", "name"]
-        # The run_query function in your app.py uses the global 'db' from app.py
-        people = main_app_run_query(sql, expected_fields=fields)
+        # PostgreSQL's RealDictCursor returns dictionaries directly, so no need for 'fields' list
+        people = main_app_run_query(sql)
         return people
     except ImportError:
-        print("ERROR in ally_routes.get_all_people_for_ally_page: Could not import db or run_query from app.py. Check app.py structure and execution.")
+        print("ERROR in ally_routes.get_all_people_for_ally_page: Could not import conn or run_query from app.py. Check app.py structure and execution.")
         return [] # Fallback to empty list
     except Exception as e:
         print(f"Error fetching people in ally_routes.get_all_people_for_ally_page: {e}")
-        import traceback
         traceback.print_exc()
         return []
 
@@ -254,4 +249,3 @@ def stream_post_status():
         yield f"event: stream_end\ndata: {json.dumps({})}\n\n"
 
     return Response(stream_with_context(generate_post_stream()), mimetype='text/event-stream')
-    

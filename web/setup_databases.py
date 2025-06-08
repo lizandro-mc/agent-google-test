@@ -3,205 +3,162 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from dateutil import parser as dateutil_parser
 import time
-
-from google.cloud import spanner
-from google.api_core import exceptions
+import sys
+import psycopg2
+from psycopg2 import extras
 
 # --- Configuration ---
-INSTANCE_ID = os.environ.get("SPANNER_INSTANCE_ID","instavibe-graph-instance")
-DATABASE_ID = os.environ.get("SPANNER_DATABASE_ID","graphdb")
+DB_NAME = os.environ.get("POSTGRES_DB", "graphdb")
+DB_USER = os.environ.get("POSTGRES_USER", "myuser")
+DB_PASSWORD = os.environ.get("POSTGRES_PASSWORD", "mypassword")
+DB_HOST = os.environ.get("POSTGRES_HOST", "localhost")
+DB_PORT = os.environ.get("POSTGRES_PORT", "5432")
 
-PROJECT_ID = os.environ.get("GOOGLE_CLOUD_PROJECT")
-
-# --- Spanner Client Initialization ---
-try:
-    spanner_client = spanner.Client(project=PROJECT_ID)
-    instance = spanner_client.instance(INSTANCE_ID)
-    database = instance.database(DATABASE_ID)
-    print(f"Targeting Spanner: {instance.name}/databases/{database.name}")
-    if not database.exists():
-        print(f"Error: Database '{DATABASE_ID}' does not exist. Please create it first.")
-        database = None
-    else:
+def get_db_connection():
+    """Establishes a connection to the PostgreSQL database."""
+    try:
+        conn = psycopg2.connect(
+            dbname=DB_NAME,
+            user=DB_USER,
+            password=DB_PASSWORD,
+            host=DB_HOST,
+            port=DB_PORT
+        )
         print("Database connection successful.")
-except exceptions.NotFound:
-    print(f"Error: Spanner instance '{INSTANCE_ID}' not found or missing permissions.")
-    spanner_client = None; instance = None; database = None
-except Exception as e:
-    print(f"Error initializing Spanner client: {e}")
-    spanner_client = None; instance = None; database = None
+        return conn
+    except psycopg2.OperationalError as e:
+        print(f"Error: Could not connect to PostgreSQL database: {e}")
+        print("Please ensure the Docker container is running and accessible.")
+        return None
 
-def run_ddl_statements(db_instance, ddl_list, operation_description):
+def run_ddl_statements(conn, ddl_list, operation_description):
     """Helper function to run DDL statements and handle potential errors."""
-    if not db_instance:
+    if not conn:
         print(f"Skipping DDL ({operation_description}) - database connection not available.")
         return False
+        
     print(f"\n--- Running DDL: {operation_description} ---")
-    print("Statements:")
-    # Print statements cleanly
-    for i, stmt in enumerate(ddl_list):
-        print(f"  [{i+1}] {stmt.strip()}") # Add numbering for clarity
-    try:
-        operation = db_instance.update_ddl(ddl_list)
-        print("Waiting for DDL operation to complete...")
-        operation.result(360) # Wait up to 6 minutes
-        print(f"DDL operation '{operation_description}' completed successfully.")
-        return True
-    except (exceptions.FailedPrecondition, exceptions.AlreadyExists) as e:
-        print(f"Warning/Info during DDL '{operation_description}': {type(e).__name__} - {e}")
-        print("Continuing script execution (schema object might already exist or precondition failed).")
-        return True
-    except exceptions.InvalidArgument as e:
-        print(f"ERROR during DDL '{operation_description}': {type(e).__name__} - {e}")
-        print(">>> This indicates a DDL syntax error. The schema was NOT created/updated correctly. Stopping script. <<<")
-        return False # Make syntax errors fatal
-    except exceptions.DeadlineExceeded:
-        print(f"ERROR during DDL '{operation_description}': DeadlineExceeded - Operation took too long.")
-        return False
-    except Exception as e:
-        print(f"ERROR during DDL '{operation_description}': {type(e).__name__} - {e}")
-        # Optionally print full traceback for debugging
-        import traceback
-        traceback.print_exc()
-        print("Stopping script due to unexpected DDL error.")
-        return False
+    
+    # We will drop tables to ensure a clean slate on each run for this script
+    drop_statements = [
+        "DROP TABLE IF EXISTS EventLocation, Mention, Attendance, Friendship, Post, Event, Person, Location CASCADE;"
+    ]
+    
+    with conn.cursor() as cur:
+        try:
+            print("Dropping existing tables for a clean setup...")
+            for stmt in drop_statements:
+                cur.execute(stmt)
+            print("Existing tables dropped.")
 
-def setup_base_schema_and_indexes(db_instance):
-    """Creates the base relational tables and associated indexes."""
+            print("Creating new tables and indexes...")
+            for i, stmt in enumerate(ddl_list):
+                print(f"  Executing: {stmt.strip()}")
+                cur.execute(stmt)
+            
+            conn.commit()
+            print(f"DDL operation '{operation_description}' completed successfully.")
+            return True
+        except psycopg2.Error as e:
+            print(f"ERROR during DDL '{operation_description}': {type(e).__name__} - {e}")
+            conn.rollback() # Rollback changes on error
+            return False
+
+def setup_base_schema_and_indexes(conn):
+    """Creates the base relational tables and associated indexes for PostgreSQL."""
     ddl_statements = [
-        # --- 1. Base Tables (No Graph Definition Here) ---
+        # --- 1. Base Tables ---
         """
-        CREATE TABLE IF NOT EXISTS Person (
-            person_id STRING(36) NOT NULL,
-            name STRING(MAX),
-            age INT64,
-            create_time TIMESTAMP NOT NULL OPTIONS(allow_commit_timestamp=true)
-        ) PRIMARY KEY (person_id)
+        CREATE TABLE Location (
+            location_id VARCHAR(36) PRIMARY KEY,
+            name TEXT,
+            description TEXT,
+            latitude DOUBLE PRECISION,
+            longitude DOUBLE PRECISION,
+            address TEXT,
+            create_time TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
         """,
         """
-        CREATE TABLE IF NOT EXISTS Event (
-            event_id STRING(36) NOT NULL,
-            name STRING(MAX),
-            description STRING(MAX), -- New field
-            event_date TIMESTAMP,
-            create_time TIMESTAMP NOT NULL OPTIONS(allow_commit_timestamp=true)
-        ) PRIMARY KEY (event_id)
+        CREATE TABLE Person (
+            person_id VARCHAR(36) PRIMARY KEY,
+            name TEXT,
+            age INTEGER,
+            create_time TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
         """,
         """
-        CREATE TABLE IF NOT EXISTS Post (
-            post_id STRING(36) NOT NULL,
-            author_id STRING(36) NOT NULL, -- References Person.person_id
-            text STRING(MAX),
-            sentiment STRING(50),
-            post_timestamp TIMESTAMP,
-            create_time TIMESTAMP NOT NULL OPTIONS(allow_commit_timestamp=true)
-        ) PRIMARY KEY (post_id)
+        CREATE TABLE Event (
+            event_id VARCHAR(36) PRIMARY KEY,
+            name TEXT,
+            description TEXT,
+            event_date TIMESTAMPTZ,
+            create_time TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
         """,
         """
-        CREATE TABLE IF NOT EXISTS Friendship (
-            person_id_a STRING(36) NOT NULL, -- References Person.person_id
-            person_id_b STRING(36) NOT NULL, -- References Person.person_id
-            friendship_time TIMESTAMP NOT NULL OPTIONS(allow_commit_timestamp=true)
-        ) PRIMARY KEY (person_id_a, person_id_b)
-        """,
-         """
-        CREATE TABLE IF NOT EXISTS Attendance (
-            person_id STRING(36) NOT NULL, -- References Person.person_id
-            event_id STRING(36) NOT NULL,  -- References Event.event_id
-            attendance_time TIMESTAMP NOT NULL OPTIONS(allow_commit_timestamp=true)
-        ) PRIMARY KEY (person_id, event_id)
+        CREATE TABLE Post (
+            post_id VARCHAR(36) PRIMARY KEY,
+            author_id VARCHAR(36) NOT NULL REFERENCES Person(person_id),
+            text TEXT,
+            sentiment VARCHAR(50),
+            post_timestamp TIMESTAMPTZ,
+            create_time TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
         """,
         """
-        CREATE TABLE IF NOT EXISTS Mention (
-            post_id STRING(36) NOT NULL,            -- References Post.post_id
-            mentioned_person_id STRING(36) NOT NULL,-- References Person.person_id
-            mention_time TIMESTAMP NOT NULL OPTIONS(allow_commit_timestamp=true)
-        ) PRIMARY KEY (post_id, mentioned_person_id)
+        CREATE TABLE Friendship (
+            person_id_a VARCHAR(36) NOT NULL REFERENCES Person(person_id),
+            person_id_b VARCHAR(36) NOT NULL REFERENCES Person(person_id),
+            friendship_time TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            PRIMARY KEY (person_id_a, person_id_b)
+        )
         """,
         """
-        CREATE TABLE IF NOT EXISTS Location (
-            location_id STRING(36) NOT NULL,
-            name STRING(MAX),
-            description STRING(MAX),
-            latitude FLOAT64,
-            longitude FLOAT64,
-            address STRING(MAX),
-            create_time TIMESTAMP NOT NULL OPTIONS(allow_commit_timestamp=true)
-        ) PRIMARY KEY (location_id)
+        CREATE TABLE Attendance (
+            person_id VARCHAR(36) NOT NULL REFERENCES Person(person_id),
+            event_id VARCHAR(36) NOT NULL REFERENCES Event(event_id),
+            attendance_time TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            PRIMARY KEY (person_id, event_id)
+        )
         """,
         """
-        CREATE TABLE IF NOT EXISTS EventLocation (
-            event_id STRING(36) NOT NULL,    -- References Event.event_id
-            location_id STRING(36) NOT NULL, -- References Location.location_id
-            create_time TIMESTAMP NOT NULL OPTIONS(allow_commit_timestamp=true),
-            CONSTRAINT FK_Event FOREIGN KEY (event_id) REFERENCES Event (event_id),
-            CONSTRAINT FK_Location FOREIGN KEY (location_id) REFERENCES Location (location_id)
-        ) PRIMARY KEY (event_id, location_id)
+        CREATE TABLE Mention (
+            post_id VARCHAR(36) NOT NULL REFERENCES Post(post_id),
+            mentioned_person_id VARCHAR(36) NOT NULL REFERENCES Person(person_id),
+            mention_time TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            PRIMARY KEY (post_id, mentioned_person_id)
+        )
+        """,
+        """
+        CREATE TABLE EventLocation (
+            event_id VARCHAR(36) NOT NULL REFERENCES Event(event_id),
+            location_id VARCHAR(36) NOT NULL REFERENCES Location(location_id),
+            create_time TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            PRIMARY KEY (event_id, location_id)
+        )
         """,
         # --- 2. Indexes ---
-        "CREATE INDEX IF NOT EXISTS PersonByName ON Person(name)",
-        "CREATE INDEX IF NOT EXISTS EventByDate ON Event(event_date DESC)",
-        "CREATE INDEX IF NOT EXISTS PostByTimestamp ON Post(post_timestamp DESC)",
-        "CREATE INDEX IF NOT EXISTS PostByAuthor ON Post(author_id, post_timestamp DESC)",
-        "CREATE INDEX IF NOT EXISTS FriendshipByPersonB ON Friendship(person_id_b, person_id_a)",
-        "CREATE INDEX IF NOT EXISTS AttendanceByEvent ON Attendance(event_id, person_id)",
-        "CREATE INDEX IF NOT EXISTS MentionByPerson ON Mention(mentioned_person_id, post_id)",
-        "CREATE INDEX IF NOT EXISTS EventLocationByLocationId ON EventLocation(location_id, event_id)", # Index for linking table
-
+        "CREATE INDEX ON Person(name)",
+        "CREATE INDEX ON Event(event_date DESC)",
+        "CREATE INDEX ON Post(post_timestamp DESC)",
+        "CREATE INDEX ON Post(author_id, post_timestamp DESC)",
+        "CREATE INDEX ON Friendship(person_id_b, person_id_a)",
+        "CREATE INDEX ON Attendance(event_id, person_id)",
+        "CREATE INDEX ON Mention(mentioned_person_id, post_id)",
+        "CREATE INDEX ON EventLocation(location_id, event_id)",
     ]
-    return run_ddl_statements(db_instance, ddl_statements, "Create Base Tables and Indexes")
+    return run_ddl_statements(conn, ddl_statements, "Create Base Tables and Indexes")
 
-# --- NEW: Function to create the property graph ---
-def setup_graph_definition(db_instance):
-    """Creates the Property Graph definition based on existing tables."""
-    # NOTE: Graph name cannot contain hyphens if unquoted. Using SocialGraph.
-    ddl_statements = [
-        # --- Create the Property Graph Definition (Using SOURCE/DESTINATION) ---
-        # "DROP PROPERTY GRAPH IF EXISTS SocialGraph", # Optional for dev
-        """
-        CREATE PROPERTY GRAPH IF NOT EXISTS SocialGraph
-          NODE TABLES (
-            Person KEY (person_id),
-            Event KEY (event_id),
-            Post KEY (post_id),
-            Location KEY (location_id) -- New Node Table
-          )
-          EDGE TABLES (
-            Friendship 
-              SOURCE KEY (person_id_a) REFERENCES Person (person_id)
-              DESTINATION KEY (person_id_b) REFERENCES Person (person_id),
-
-            
-            Attendance AS Attended 
-              SOURCE KEY (person_id) REFERENCES Person (person_id)
-              DESTINATION KEY (event_id) REFERENCES Event (event_id),
-
-            
-            Mention AS Mentioned
-              SOURCE KEY (post_id) REFERENCES Post (post_id)
-              DESTINATION KEY (mentioned_person_id) REFERENCES Person (person_id),
-
-            
-            Post AS Wrote 
-              SOURCE KEY (author_id) REFERENCES Person (person_id)
-              DESTINATION KEY (post_id) REFERENCES Post (post_id),
-
-            EventLocation AS HasLocation -- New Edge Table
-              SOURCE KEY (event_id) REFERENCES Event (event_id)
-              DESTINATION KEY (location_id) REFERENCES Location (location_id)
-          )
-        """
-    ]
-    return run_ddl_statements(db_instance, ddl_statements, "Create Property Graph Definition")
-
-    
 
 # --- Data Generation / Insertion ---
 def generate_uuid(): return str(uuid.uuid4())
 
-def insert_relational_data(db_instance):
+def insert_relational_data(conn):
     """Generates and inserts the curated data into the new relational tables."""
-    if not db_instance: print("Skipping data insertion - db connection unavailable."); return False
+    if not conn: 
+        print("Skipping data insertion - db connection unavailable.")
+        return False
     print("\n--- Defining Fixed Curated Data for Relational Insertion ---")
 
     people_map = {} # name -> id
@@ -228,13 +185,11 @@ def insert_relational_data(db_instance):
         "Mike": {"age": 36}, "Nora": {"age": 29}, "Oscar": {"age": 32}
     }
     print(f"Preparing {len(people_data)} people.")
+    print(f"Preparing {len(people_data)} people.")
     for name, data in people_data.items():
         person_id = generate_uuid()
         people_map[name] = person_id
-        people_rows.append({
-            "person_id": person_id, "name": name, "age": data.get("age"), # Use .get for safety
-            "create_time": spanner.COMMIT_TIMESTAMP
-        })
+        people_rows.append((person_id, name, data.get("age")))
 
     # 2. Prepare Events Data
     event_data = {
@@ -251,46 +206,25 @@ def insert_relational_data(db_instance):
         event_id = generate_uuid()
         event_map[name] = event_id
         try:
-             ts_str = data.get("date")
-             if not ts_str:
-                 print(f"Warning: Missing date for event '{name}', skipping.")
-                 continue
-             ts = dateutil_parser.isoparse(ts_str)
-             # Ensure it's timezone-aware (Spanner prefers UTC)
-             if ts.tzinfo is None or ts.tzinfo.utcoffset(ts) is None:
-                 ts = ts.replace(tzinfo=timezone.utc) # Assume naive dates are UTC
-             else:
-                 ts = ts.astimezone(timezone.utc) # Convert aware dates to UTC
+            ts_str = data.get("date")
+            if not ts_str: continue
+            ts = dateutil_parser.isoparse(ts_str)
+            events_rows.append((event_id, name, data.get("description"), ts))
 
-             events_rows.append({
-                "event_id": event_id, "name": name, "description": data.get("description"), "event_date": ts,
-                "create_time": spanner.COMMIT_TIMESTAMP
-             })
-
-             # Prepare Locations and EventLocations
-             if "locations" in data and isinstance(data["locations"], list):
+            if "locations" in data and isinstance(data["locations"], list):
                 for loc_detail in data["locations"]:
-                    loc_key_tuple = (loc_detail["name"], loc_detail["latitude"], loc_detail["longitude"]) # Unique key for this location instance
-                    
+                    loc_key_tuple = (loc_detail["name"], loc_detail["latitude"], loc_detail["longitude"])
                     if loc_key_tuple not in locations_map:
                         location_id = generate_uuid()
                         locations_map[loc_key_tuple] = location_id
-                        locations_rows.append({
-                            "location_id": location_id,
-                            "name": loc_detail["name"],
-                            "description": loc_detail.get("description"),
-                            "latitude": loc_detail["latitude"],
-                            "longitude": loc_detail["longitude"],
-                            "address": loc_detail.get("address"),
-                            "create_time": spanner.COMMIT_TIMESTAMP
-                        })
+                        locations_rows.append((
+                            location_id, loc_detail["name"], loc_detail.get("description"),
+                            loc_detail["latitude"], loc_detail["longitude"], loc_detail.get("address")
+                        ))
                     else:
                         location_id = locations_map[loc_key_tuple]
-                    
-                    event_locations_rows.append({
-                        "event_id": event_id, "location_id": location_id, "create_time": spanner.COMMIT_TIMESTAMP
-                    })
-        except (TypeError, ValueError, OverflowError) as e: # Catch specific errors
+                    event_locations_rows.append((event_id, location_id))
+        except (TypeError, ValueError, OverflowError) as e:
             print(f"Warning: Could not parse date for event '{name}' (value: {data.get('date')}, error: {e}), skipping.")
 
 
@@ -300,19 +234,12 @@ def insert_relational_data(db_instance):
     print(f"Preparing friendships from {len(friendship_data)} potential pairs.")
     for p1_name, p2_name in friendship_data:
         if p1_name in people_map and p2_name in people_map:
-             id1, id2 = people_map[p1_name], people_map[p2_name]
-             if id1 == id2: continue # Skip self-friendship
-             # Ensure person_id_a is lexicographically smaller than person_id_b for consistent PK
-             person_id_a, person_id_b = tuple(sorted((id1, id2)))
-             if (person_id_a, person_id_b) not in unique_friendship_pairs:
-                 friendship_rows.append({
-                    "person_id_a": person_id_a, "person_id_b": person_id_b,
-                    "friendship_time": spanner.COMMIT_TIMESTAMP
-                 })
-                 unique_friendship_pairs.add((person_id_a, person_id_b))
-        else:
-            print(f"Warning: Skipping friendship due to missing person ('{p1_name}' or '{p2_name}').")
-    print(f"Prepared {len(friendship_rows)} unique friendship rows.")
+            id1, id2 = people_map[p1_name], people_map[p2_name]
+            if id1 == id2: continue
+            person_id_a, person_id_b = tuple(sorted((id1, id2)))
+            if (person_id_a, person_id_b) not in unique_friendship_pairs:
+                friendship_rows.append((person_id_a, person_id_b))
+                unique_friendship_pairs.add((person_id_a, person_id_b))
 
 
     # 4. Prepare Attendance Data
@@ -320,12 +247,7 @@ def insert_relational_data(db_instance):
     print(f"Preparing {len(attendance_data)} attendance records.")
     for person_name, event_name in attendance_data:
         if person_name in people_map and event_name in event_map:
-            attendance_rows.append({
-                "person_id": people_map[person_name], "event_id": event_map[event_name],
-                "attendance_time": spanner.COMMIT_TIMESTAMP
-            })
-        else:
-            print(f"Warning: Skipping attendance record due to missing person ('{person_name}') or event ('{event_name}').")
+            attendance_rows.append((people_map[person_name], event_map[event_name]))
 
     # 5. Prepare Posts and Mentions Data
     # --- PASTE FULL posts_data list here ---
@@ -566,165 +488,90 @@ def insert_relational_data(db_instance):
     #---------------------------------------------
 
     print(f"Preparing {len(posts_data)} posts and associated mentions.")
-    post_counter = 0
     for post_info in posts_data:
-        person_name = post_info.get("person") # Assume this is correct
-        if not person_name or person_name not in people_map:
-            print(f"Warning: Skipping post from unknown or missing person '{person_name}': {post_info.get('text', 'N/A')[:50]}...")
-            continue
-
+        author_name = post_info["person"]
+        if author_name not in people_map: continue
+        
+        author_id = people_map[author_name]
         post_id = generate_uuid()
-        post_counter += 1
-        author_id = people_map[person_name]
-
-
-        try:
-            days_ago = post_info.get("days_ago", 0)
-            hours_ago = post_info.get("hours_ago", 0)
-            # Ensure timestamp is timezone-aware UTC
-            post_timestamp = (now - timedelta(days=days_ago, hours=hours_ago))
-            # No need to check tzinfo here as 'now' is already UTC
-            # if post_timestamp.tzinfo is None:
-            #      post_timestamp = post_timestamp.replace(tzinfo=timezone.utc)
-            # else:
-            #      post_timestamp = post_timestamp.astimezone(timezone.utc)
-
-            posts_rows.append({
-                "post_id": post_id,
-                "author_id": author_id,
-                "text": post_info.get("text"),
-                "sentiment": post_info.get("sentiment"), # Use .get for safety
-                "post_timestamp": post_timestamp,
-                "create_time": spanner.COMMIT_TIMESTAMP
-            })
-        except (TypeError, ValueError, KeyError, OverflowError) as e:
-            print(f"Warning: Skipping post due to data/time calculation issue ({e}): {post_info.get('text', 'N/A')[:50]}...")
-            continue # Skip this post entirely if data is bad
-
-        # Process mention only if post was successfully prepared
-        mentioned_person_name = post_info.get("mention")
-        if mentioned_person_name:
-            if mentioned_person_name in people_map:
-                mention_rows.append({
-                    "post_id": post_id, # Use the generated post_id
-                    "mentioned_person_id": people_map[mentioned_person_name],
-                    "mention_time": spanner.COMMIT_TIMESTAMP # Use commit timestamp for simplicity
-                })
-            else:
-                 print(f"Warning: Skipping mention for unknown person '{mentioned_person_name}' in post by '{person_name}'.")
+        post_ts = now - timedelta(days=post_info["days_ago"], hours=post_info["hours_ago"])
+        
+        posts_rows.append((
+            post_id, author_id, post_info["text"], post_info["sentiment"], post_ts
+        ))
+        
+        mentioned_name = post_info.get("mention")
+        if mentioned_name and mentioned_name in people_map:
+            mentioned_id = people_map[mentioned_name]
+            mention_rows.append((post_id, mentioned_id))
 
     print(f"Prepared {len(posts_rows)} post rows, {len(mention_rows)} mention rows, {len(locations_rows)} location rows, and {len(event_locations_rows)} event-location link rows.")
 
 
 
-    # --- 6. Insert Data into Spanner using a Transaction ---
-    print("\n--- Inserting Data into Relational Tables ---")
-    inserted_counts = {}
-
-    # Define the function to be run in the transaction
-    def insert_data_txn(transaction):
-        total_rows_attempted = 0
-        # Define structure: Table Name -> (Columns List, Rows Data List of Dicts)
-        table_map = {
-            "Person": (["person_id", "name", "age", "create_time"], people_rows),
-            "Event": (["event_id", "name", "description", "event_date", "create_time"], events_rows),
-            "Location": (["location_id", "name", "description", "latitude", "longitude", "address", "create_time"], locations_rows),
-            "Post": (["post_id", "author_id", "text", "sentiment", "post_timestamp", "create_time"], posts_rows),
-            "Friendship": (["person_id_a", "person_id_b", "friendship_time"], friendship_rows),
-            "Attendance": (["person_id", "event_id", "attendance_time"], attendance_rows),
-            "Mention": (["post_id", "mentioned_person_id", "mention_time"], mention_rows),
-            "EventLocation": (["event_id", "location_id", "create_time"], event_locations_rows)
-        }
-
-        for table_name, (cols, rows_dict_list) in table_map.items():
-            if rows_dict_list:
-                print(f"Inserting {len(rows_dict_list)} rows into {table_name}...")
-                # Convert list of dicts into list of tuples matching column order
-                values_list = []
-                for row_dict in rows_dict_list:
-                    try:
-                        # Ensure all columns exist in the dict (or handle None)
-                        # and are in the correct order
-                        values_tuple = tuple(row_dict.get(c) for c in cols)
-                        values_list.append(values_tuple)
-                    except Exception as e:
-                        print(f"Error preparing row for {table_name}: {e} - Row: {row_dict}")
-                        # Decide if you want to skip this row or fail the transaction
-                        # For now, let it potentially fail the transaction later if types mismatch etc.
-
-                if values_list: # Only insert if we have valid rows prepared
-                    transaction.insert(
-                        table=table_name,
-                        columns=cols,
-                        values=values_list # Pass the list of tuples
-                    )
-                    inserted_counts[table_name] = len(values_list)
-                    total_rows_attempted += len(values_list)
-                else:
-                    inserted_counts[table_name] = 0
-            else:
-                inserted_counts[table_name] = 0
-        print(f"Transaction attempting to insert {total_rows_attempted} rows across all tables.")
-
-    # Execute the transaction
+   # --- Database Insertion ---
+    print("\n--- Inserting Data into PostgreSQL ---")
     try:
-        print("Executing data insertion transaction...")
-        # Only run if there's actually data to insert
-        all_data_lists = [
-            people_rows, events_rows, locations_rows, posts_rows,
-            friendship_rows, attendance_rows, mention_rows, event_locations_rows
-        ]
-        if any(len(data_list) > 0 for data_list in all_data_lists):
-            db_instance.run_in_transaction(insert_data_txn)
-            print("Transaction committed successfully.")
-            for table, count in inserted_counts.items():
-                if count > 0: print(f"  -> Inserted {count} rows into {table}.")
-            return True
-        else:
-            print("No data prepared for insertion.")
-        return True # Successful because nothing needed to be done
-    except exceptions.Aborted as e:
-         # Handle potential transaction aborts (e.g., contention) - retrying might be needed
-         print(f"ERROR: Data insertion transaction aborted: {e}. Consider retrying.")
-         return False
-    except Exception as e:
-        print(f"ERROR during data insertion transaction: {type(e).__name__} - {e}")
-        # Optionally print more details for debugging complex errors
-        import traceback
-        traceback.print_exc()
-        print("Data insertion failed. Database schema might exist but data is missing/incomplete.")
+        with conn.cursor() as cur:
+            # Using executemany for efficient bulk inserts
+            print(f"Inserting {len(locations_rows)} locations...")
+            extras.execute_values(cur, "INSERT INTO Location (location_id, name, description, latitude, longitude, address) VALUES %s", locations_rows)
+            
+            print(f"Inserting {len(people_rows)} people...")
+            extras.execute_values(cur, "INSERT INTO Person (person_id, name, age) VALUES %s", people_rows)
+            
+            print(f"Inserting {len(events_rows)} events...")
+            extras.execute_values(cur, "INSERT INTO Event (event_id, name, description, event_date) VALUES %s", events_rows)
+            
+            print(f"Inserting {len(posts_rows)} posts...")
+            extras.execute_values(cur, "INSERT INTO Post (post_id, author_id, text, sentiment, post_timestamp) VALUES %s", posts_rows)
+            
+            print(f"Inserting {len(friendship_rows)} friendships...")
+            extras.execute_values(cur, "INSERT INTO Friendship (person_id_a, person_id_b) VALUES %s", friendship_rows)
+            
+            print(f"Inserting {len(attendance_rows)} attendance records...")
+            extras.execute_values(cur, "INSERT INTO Attendance (person_id, event_id) VALUES %s", attendance_rows)
+            
+            print(f"Inserting {len(mention_rows)} mentions...")
+            extras.execute_values(cur, "INSERT INTO Mention (post_id, mentioned_person_id) VALUES %s", mention_rows)
+
+            print(f"Inserting {len(event_locations_rows)} event-location links...")
+            extras.execute_values(cur, "INSERT INTO EventLocation (event_id, location_id) VALUES %s", event_locations_rows)
+
+        conn.commit()
+        print("\nData insertion completed successfully.")
+        return True
+    except psycopg2.Error as e:
+        print(f"ERROR during data insertion: {e}")
+        conn.rollback()
         return False
 
 
-# --- Main Execution ---
-if __name__ == "__main__":
-    print("Starting Spanner Relational Schema Setup Script...")
+
+def main():
+    """Main function to orchestrate schema setup and data insertion."""
     start_time = time.time()
+    db_conn = get_db_connection()
 
-    if not database:
-        print("\nCritical Error: Spanner database connection not established. Aborting.")
-        exit(1)
+    if not db_conn:
+        sys.exit(1) # Exit if no database connection
 
-    # --- Step 1: Create schema (No Drops) ---
-    # Added IF NOT EXISTS to CREATE INDEX statements for robustness
-    if not setup_base_schema_and_indexes(database):
-        print("\nAborting script due to errors during base schema/index creation.")
-        exit(1)
+    # Step 1: Create the relational schema
+    if not setup_base_schema_and_indexes(db_conn):
+        print("Halting script due to schema setup failure.")
+        db_conn.close()
+        sys.exit(1)
+        
+    # Step 2: Insert the data
+    if not insert_relational_data(db_conn):
+        print("Halting script due to data insertion failure.")
+        db_conn.close()
+        sys.exit(1)
 
-    # --- Step 2: Create graph definition ---
-    # Run this in a separate DDL operation
-    if not setup_graph_definition(database):
-        print("\nAborting script due to errors during graph definition creation.")
-        exit(1)
-
-    # --- Step 3: Insert data into the base tables ---
-    if not insert_relational_data(database):
-        print("\nScript finished with errors during data insertion.")
-        exit(1)
-
+    db_conn.close()
     end_time = time.time()
-    print("\n-----------------------------------------")
-    print("Script finished successfully!")
-    print(f"Database '{DATABASE_ID}' on instance '{INSTANCE_ID}' has been set up with the relational schema and populated.")
-    print(f"Total time: {end_time - start_time:.2f} seconds")
-    print("-----------------------------------------")
+    print(f"\n--- Script finished successfully in {end_time - start_time:.2f} seconds ---")
+
+
+if __name__ == "__main__":
+    main()

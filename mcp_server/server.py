@@ -18,10 +18,10 @@ from google.adk.tools.function_tool import FunctionTool
 
 from google.adk.tools.mcp_tool.conversion_utils import adk_to_mcp_tool_type
 
-from instavibe import create_event,create_post
+from tools import create_event,create_post
 load_dotenv()
 APP_HOST = os.environ.get("APP_HOST", "0.0.0.0")
-APP_PORT = os.environ.get("APP_PORT",8080)
+APP_PORT = int(os.environ.get("APP_PORT",8080))
 
 
 event_tool = FunctionTool(create_event)
