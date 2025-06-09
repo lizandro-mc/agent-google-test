@@ -7,7 +7,7 @@ from google.adk.sessions import InMemorySessionService
 from google.adk.artifacts.in_memory_artifact_service import InMemoryArtifactService
 
 
-from . import agent 
+from . import agent
 import asyncio
 
 load_dotenv()
@@ -17,7 +17,8 @@ async def async_main():
   # Artifact service might not be needed for this example
   artifacts_service = InMemoryArtifactService()
 
-  session = session_service.create_session(
+  # FIX: Await the create_session coroutine
+  session = await session_service.create_session( # <--- Added 'await' here
       state={}, app_name='planner_app', user_id='user_dc'
   )
 

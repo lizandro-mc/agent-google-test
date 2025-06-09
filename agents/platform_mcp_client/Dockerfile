@@ -22,7 +22,7 @@ ENV PYTHONPATH=/app/agents
 
 # Make port 8080 available to the world outside this container
 # Cloud Run uses the PORT env var, but EXPOSE is good practice.
-EXPOSE 8080
+EXPOSE 10002
 
 # --- Run the application ---
 # Run a2a_server.py when the container launches

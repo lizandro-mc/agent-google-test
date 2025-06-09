@@ -8,13 +8,13 @@ WORKDIR /app
 
 # --- Dependency Installation ---
 # Copy only the requirements file first to leverage Docker cache
-COPY ./social/requirements.txt /app/requirements.txt
-COPY ./a2a_common-0.1.0-py3-none-any.whl /app/a2a_common-0.1.0-py3-none-any.whl
+COPY agents/social/requirements.txt /app/requirements.txt
+COPY agents/a2a_common-0.1.0-py3-none-any.whl /app/a2a_common-0.1.0-py3-none-any.whl
 RUN pip install --no-cache-dir -r requirements.txt
 
 
 # --- Application Code ---
-COPY ./social /app/agents/social
+COPY agents/social /app/agents/social
 
 # --- Environment ---
 ENV PYTHONPATH=/app/agents 
@@ -22,7 +22,7 @@ ENV PYTHONPATH=/app/agents
 
 # Make port 8080 available to the world outside this container
 # Cloud Run uses the PORT env var, but EXPOSE is good practice.
-EXPOSE 8080
+EXPOSE 10001
 
 # --- Run the application ---
 # Run a2a_server.py when the container launches
