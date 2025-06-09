@@ -41,3 +41,4 @@ agents/platform_mcp_client/.env
 agents/social/.env
 mcp_server/.env
 web/.env
+agents/.env
