@@ -1,0 +1,24 @@
+FROM python:3.12-slim-bookworm
+
+# Set working directory inside the container
+WORKDIR /app
+
+# Copy your project files into the container
+# This copies everything from the build context (your project root)
+COPY agents /app
+
+# Install dependencies
+# Assuming your requirements.txt is in the project root or a specific subdirectory
+# Adjust this path if your requirements.txt is elsewhere
+COPY agents/requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r /app/requirements.txt
+
+# If you have local packages like a2a_common, install them too
+# Make sure the path is correct relative to /app
+RUN pip install /app/a2a_common-0.1.0-py3-none-any.whl
+
+# Expose the port Uvicorn will run on
+EXPOSE 8000
+
+# Command to run the ADK web UI
+CMD ["adk", "api_server"]

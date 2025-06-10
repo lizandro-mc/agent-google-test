@@ -1,7 +1,7 @@
 import datetime
 from zoneinfo import ZoneInfo
 from google.adk.agents import LoopAgent, LlmAgent, BaseAgent
-from social.instavibe import get_person_posts,get_person_friends,get_person_id_by_name,get_person_attended_events
+from social.postgres_data_fetchers import get_person_posts,get_person_friends,get_person_id_by_name,get_person_attended_events
 from google.adk.agents.invocation_context import InvocationContext
 from google.adk.events import Event, EventActions
 from typing import AsyncGenerator
@@ -37,7 +37,7 @@ profile_agent = LlmAgent(
 )
 
 summary_agent = LlmAgent(
-    name="summary_agent",
+    name="social_agent",
     model="gemini-2.0-flash",
     description=(
         "Generate a comprehensive social summary as a single, cohesive paragraph. This summary should cover the activities, posts, friend networks, and event participation of one or more individuals. If multiple profiles are analyzed, the paragraph must also identify and integrate any common ground found between them."

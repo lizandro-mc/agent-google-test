@@ -35,3 +35,15 @@ cython_debug/
 
 __pycache__/
 *.pyc
+agents/planner/.env
+agents/orchestrate/.env
+agents/platform_mcp_client/.env
+agents/social/.env
+mcp_server/.env
+web/.env
+agents/.env
+agents/orchestrate/__pycache__
+agents/planner/__pycache__
+agents/platform_mcp_client/__pycache__
+agents/social/__pycache__
+mcp_server/__pycache__
