@@ -2,85 +2,147 @@ import os
 import json
 import pprint
 import traceback
-import requests # New: for making HTTP requests
+import requests
 from dotenv import load_dotenv
+import uuid # For generating unique session IDs
 
 load_dotenv()
 
 # --- Configuration for Local Orchestrator Agent ---
-# Define the URL of your local orchestrator agent service
-# This will be 'http://<orchestrator-service-name>:<port>' in Docker Compose
-# For example, if your orchestrator agent service is named 'orchestrator-agent' and runs on port 5001:
-ORCHESTRATOR_AGENT_URL = os.environ.get('ORCHESTRATOR_AGENT_URL', 'http://orchestrator-agent:5001/query')
-# Ensure 'orchestrator-agent' matches the service name in your docker-compose.yml
-# and 5001 is the port it exposes. '/query' is an assumed endpoint for agent interaction.
-
-# No longer using vertexai.agent_engines
-# ORCHESTRATE_AGENT_ID = os.environ.get('ORCHESTRATE_AGENT_ID')
-# agent_engine = agent_engines.get(ORCHESTRATE_AGENT_ID)
+# Define the base URL of your local orchestrator service
+ORCHESTRATOR_BASE_URL = os.environ.get('ORCHESTRATOR_BASE_URL', 'http://adk_platform:8000')
 
 # --- Dummy Agent Proxy (Replaces Vertex AI Agent Engine) ---
-# This class will encapsulate the logic for sending requests to your local orchestrator agent.
 class LocalOrchestratorAgentProxy:
-    def __init__(self, agent_url):
-        self.agent_url = agent_url
+    def __init__(self, base_url):
+        self.base_url = base_url
+        self.session_id = None # To store the active session ID
+
+    def _create_session(self, user_id: str):
+        """
+        Creates or updates a session for the given user.
+        The session ID is generated if not already set for this proxy instance.
+        """
+        if not self.session_id:
+            self.session_id = f"s_{uuid.uuid4().hex}" # Generate a unique session ID if not already existing
+
+        session_url = f"{self.base_url}/apps/orchestrate/users/{user_id}/sessions/{self.session_id}"
+        headers = {'Content-Type': 'application/json'}
+        payload = {"state": {"initial_state": "true"}} # You can pass initial state data here
+
+        print(f"--- Creating/Updating Session: POST {session_url} with payload {payload} ---")
+        try:
+            response = requests.post(session_url, headers=headers, json=payload, timeout=60)
+            response.raise_for_status()
+            session_data = response.json()
+            print(f"--- Session created/updated successfully: {session_data.get('id')} ---")
+            return session_data.get('id')
+        except requests.exceptions.RequestException as e:
+            print(f"Error creating/updating session: {e}")
+            raise
 
     def stream_query(self, user_id: str, message: str):
         """
-        Simulates streaming by yielding chunks from a single HTTP response
-        or by yielding intermediate thoughts if your local agent supports it.
-        For a simple HTTP POST, it will likely be a single response.
+        Sends a message to the orchestrator's /run endpoint within a session
+        and yields streaming responses.
         """
+        # Ensure a session is active before running the query
+        if not self.session_id:
+            try:
+                self._create_session(user_id)
+            except Exception as e:
+                yield {"content": {"parts": [{"text": f"Error: Failed to establish session: {e}"}]}}
+                return
+
+        run_url = f"{self.base_url}/run"
         headers = {'Content-Type': 'application/json'}
+
+        # --- MODIFIED PAYLOAD STRUCTURE FOR /run ENDPOINT ---
         payload = {
-            'user_id': user_id,
-            'message': message
+            "app_name": "orchestrate", # As confirmed by your expected payload structure
+            "user_id": user_id,
+            "session_id": self.session_id,
+            "new_message": {
+                "role": "user",
+                "parts": [
+                    {
+                        "text": message
+                    }
+                ]
+            }
         }
-        
-        print(f"--- Sending POST request to local orchestrator agent: {self.agent_url} ---")
+        # --- END MODIFIED PAYLOAD STRUCTURE ---
+
+        print(f"--- Sending POST request to orchestrator /run endpoint: {run_url} ---")
+        print(f"--- Payload: {json.dumps(payload, indent=2)} ---")
+
         try:
-            # We'll assume your local agent returns a single JSON object with the full response
-            # or a stream of JSON objects if it supports SSE.
-            # For simplicity, let's assume a single POST request returns a JSON object.
-            # If your local agent supports true SSE, you'll need requests-futures or similar for async streaming.
-            
-            with requests.post(self.agent_url, headers=headers, json=payload, stream=True, timeout=300) as response:
-                response.raise_for_status()  # Raise an HTTPError for bad responses (4xx or 5xx)
-                
-                # If your orchestrator agent sends a single complete JSON response:
+            with requests.post(run_url, headers=headers, json=payload, stream=True, timeout=300) as response:
+                response.raise_for_status() # Raise an HTTPError for bad responses (4xx or 5xx)
+
+                # --- FIX: Accumulate the entire response content and parse as a single JSON array ---
+                full_response_content = ""
+                for chunk in response.iter_content(chunk_size=1024):
+                    if chunk:
+                        full_response_content += chunk.decode('utf-8')
+
+                print(f"--- Received full raw response from /run: {full_response_content[:500]}... ---") # Log beginning for debug
+
                 try:
-                    full_response_data = response.json()
-                    # We expect the 'content' key in the response for compatibility
-                    yield {"content": {"parts": [{"text": full_response_data.get("agent_response", json.dumps(full_response_data))}]}}
-                    # If your orchestrator agent sends a structured stream (e.g., SSE),
-                    # you would iterate over response.iter_lines() and parse each event.
-                except json.JSONDecodeError:
-                    print(f"Local agent response was not valid JSON: {response.text}")
-                    yield {"content": {"parts": [{"text": f"Error: Local agent returned invalid JSON. Raw: {response.text}"}]}}
-                
+                    all_events = json.loads(full_response_content)
+                    if not isinstance(all_events, list):
+                        print(f"Warning: Expected a list of events, but received a {type(all_events)}. Attempting to wrap it if it's a single dict.")
+                        if isinstance(all_events, dict):
+                            all_events = [all_events] # Wrap single dict in a list
+                        else:
+                            # If it's not a list or a dict, we can't process it as events
+                            yield {"content": {"parts": [{"text": f"Error: Unexpected non-JSON or non-list response from orchestrator: {full_response_content}"}]}}
+                            return
+
+                    for event in all_events:
+                        yield event # Yield each individual event from the parsed list
+                except json.JSONDecodeError as e:
+                    print(f"Error decoding full JSON response from /run: {e}")
+                    yield {"content": {"parts": [{"text": f"Error: Failed to decode orchestrator response as JSON. Details: {e}. Raw: {full_response_content}"}]}}
+                except Exception as e:
+                    print(f"Unexpected error processing all_events: {e}")
+                    yield {"content": {"parts": [{"text": f"Error: Unexpected internal processing error: {e}"}]}}
+
         except requests.exceptions.ConnectionError as e:
-            print(f"Connection Error to local orchestrator agent at {self.agent_url}: {e}")
-            yield {"content": {"parts": [{"text": f"Error: Could not connect to orchestrator agent: {e}"}]}}
+            print(f"Connection Error to orchestrator at {self.base_url}: {e}")
+            yield {"content": {"parts": [{"text": f"Error: Could not connect to orchestrator: {e}"}]}}
         except requests.exceptions.Timeout:
-            print(f"Timeout connecting to local orchestrator agent at {self.agent_url}")
-            yield {"content": {"parts": [{"text": f"Error: Timeout connecting to orchestrator agent."}]}}
+            print(f"Timeout connecting to orchestrator at {self.base_url}")
+            yield {"content": {"parts": [{"text": f"Error: Timeout connecting to orchestrator."}]}}
         except requests.exceptions.RequestException as e:
-            print(f"Request Exception during call to local orchestrator agent: {e}")
-            yield {"content": {"parts": [{"text": f"Error: Request to orchestrator agent failed: {e}"}]}}
+            # Enhanced error handling to print response body for 4xx/5xx errors
+            error_message = f"Request Exception during call to orchestrator /run: {e}"
+            print(error_message)
+
+            if isinstance(e, requests.exceptions.HTTPError):
+                try:
+                    error_details = e.response.json() # Try to parse JSON error
+                    print(f"Server error details (JSON): {json.dumps(error_details, indent=2)}")
+                    yield {"content": {"parts": [{"text": f"Error: Request to orchestrator /run failed: {e}. Details: {json.dumps(error_details)}"}]}}
+                except (json.JSONDecodeError, AttributeError):
+                    # If not JSON, print raw text
+                    print(f"Server error details (raw text): {e.response.text}")
+                    yield {"content": {"parts": [{"text": f"Error: Request to orchestrator /run failed: {e}. Details: {e.response.text}"}]}}
+            else:
+                yield {"content": {"parts": [{"text": f"Error: Request to orchestrator /run failed: {e}"}]}}
         except Exception as e:
-            print(f"Unexpected error in LocalOrchestratorAgentProxy: {e}")
+            print(f"Unexpected error in LocalOrchestratorAgentProxy stream_query: {e}")
             traceback.print_exc()
-            yield {"content": {"parts": [{"text": f"Error: Unexpected error calling orchestrator agent: {e}"}]}}
+            yield {"content": {"parts": [{"text": f"Error: Unexpected error calling orchestrator: {e}"}]}}
 
 
 # Initialize your local agent proxy
-local_agent_proxy = LocalOrchestratorAgentProxy(ORCHESTRATOR_AGENT_URL)
+local_agent_proxy = LocalOrchestratorAgentProxy(ORCHESTRATOR_BASE_URL)
 
 def call_agent_for_plan(user_name, planned_date, location_n_perference, selected_friend_names_list):
     user_id = str(user_name)
 
     yield {"type": "thought", "data": f"--- IntrovertAlly Agent Call Initiated (Local Orchestrator) ---"}
-    yield {"type": "thought", "data": f"Session ID for this run: {user_id}"}
     yield {"type": "thought", "data": f"User: {user_name}"}
     yield {"type": "thought", "data": f"Planned Date: {planned_date}"}
     yield {"type": "thought", "data": f"Location/Preference: {location_n_perference}"}
@@ -135,11 +197,23 @@ def call_agent_for_plan(user_name, planned_date, location_n_perference, selected
             print(f"\n--- Event {event_idx} Received from Local Agent ---") # Console
             pprint.pprint(event) # Console
             try:
-                content = event.get('content', {})
-                parts = content.get('parts', [])
-                
+                # --- MODIFIED: Handle 'content' being a list or a dict ---
+                content_data = event.get('content') # Get content, could be dict or list
+
+                parts = []
+                if isinstance(content_data, dict):
+                    parts = content_data.get('parts', [])
+                elif isinstance(content_data, list):
+                    # If 'content' itself is the list of parts, use it directly
+                    parts = content_data
+                elif content_data is not None:
+                    # If content_data is not a dict, list, or None, convert it to a single part list
+                    # This catches cases where 'content' is just a string directly
+                    parts = [{"text": str(content_data)}]
+
                 if not parts:
                     pass # Avoid too much noise for empty events
+
                 for part_idx, part in enumerate(parts):
                     if isinstance(part, dict):
                         text = part.get('text')
@@ -148,31 +222,37 @@ def call_agent_for_plan(user_name, planned_date, location_n_perference, selected
                             accumulated_json_str += text
                         else:
                             # If your local agent returns tool calls, you'd process them here
-                            tool_code = part.get('tool_code')
-                            tool_code_output = part.get('tool_code_output')
-                            if tool_code:
-                                yield {"type": "thought", "data": f"Agent is considering using a tool: {tool_code.get('name', 'Unnamed tool')}."}
-                            if tool_code_output:
-                                yield {"type": "thought", "data": f"Agent received output from tool '{tool_code.get('name', 'Unnamed tool')}'."}
+                            function_call = part.get('functionCall') # Corrected key for function calls
+                            function_response = part.get('functionResponse') # Corrected key for function responses
+
+                            if function_call:
+                                yield {"type": "thought", "data": f"Agent is considering using a tool: {function_call.get('name', 'Unnamed tool')} with args: {function_call.get('args', {})}"}
+                            if function_response:
+                                yield {"type": "thought", "data": f"Agent received output from tool '{function_response.get('name', 'Unnamed tool')}': {function_response.get('response', {})}"}
+                    elif isinstance(part, str): # Handle cases where a part is just a string
+                        yield {"type": "thought", "data": f"Agent: \"{part}\""}
+                        accumulated_json_str += part
+                    else:
+                        yield {"type": "thought", "data": f"Warning: Unrecognized part type at event {event_idx}, part {part_idx}: {type(part)} - {part}"}
             except Exception as e_inner:
-                yield {"type": "thought", "data": f"Error processing agent event part {event_idx}: {str(e_inner)}"}
+                yield {"type": "thought", "data": f"Error processing agent event part {event_idx}: {str(e_inner)} - Raw Event: {event}"}
 
     except Exception as e_outer:
         yield {"type": "thought", "data": f"Critical error during local agent stream query: {str(e_outer)}"}
         yield {"type": "error", "data": {"message": f"Error during local agent interaction: {str(e_outer)}", "raw_output": accumulated_json_str}}
         return # Stop generation
-    
+
     yield {"type": "thought", "data": f"--- End of Local Agent Response Stream ---"}
 
     # Attempt to extract JSON if it's wrapped in markdown
     if "```json" in accumulated_json_str:
-        print("Detected JSON in markdown code block. Extracting...") 
-       
+        print("Detected JSON in markdown code block. Extracting...")
+
         try:
             # Extract content between ```json and ```
             json_block = accumulated_json_str.split("```json", 1)[1].rsplit("```", 1)[0].strip()
             accumulated_json_str = json_block
-            print(f"Extracted JSON block: {accumulated_json_str}") 
+            print(f"Extracted JSON block: {accumulated_json_str}")
         except IndexError:
             yield {"type": "thought", "data": "Could not extract JSON from markdown block, will attempt to parse the full response."}
 
@@ -189,13 +269,14 @@ def call_agent_for_plan(user_name, planned_date, location_n_perference, selected
         yield {"type": "error", "data": {"message": "Local agent returned no content.", "raw_output": ""}}
 
 
-def post_plan_event(user_name, confirmed_plan, edited_invite_message, agent_session_user_id):
+def post_plan_event(user_name, confirmed_plan, edited_invite_message, agent_session_user_id): # Added agent_session_user_id back
     """
     Delegates event and post creation to the local orchestrator agent.
     Yields 'thought' events for logging.
     """
+    user_id = str(agent_session_user_id) # Use the provided agent_session_user_id for consistency with the orchestrator session
+    
     yield {"type": "thought", "data": f"--- Post Plan Event Agent Call Initiated (Local Orchestrator) ---"}
-    yield {"type": "thought", "data": f"Agent Session ID for this run: {agent_session_user_id}"}
     yield {"type": "thought", "data": f"User performing action: {user_name}"}
     yield {"type": "thought", "data": f"Received Confirmed Plan (event_name): {confirmed_plan.get('event_name', 'N/A')}"}
     yield {"type": "thought", "data": f"Received Invite Message: {edited_invite_message[:100]}..."} # Log a preview
@@ -250,31 +331,55 @@ def post_plan_event(user_name, confirmed_plan, edited_invite_message, agent_sess
 
     yield {"type": "thought", "data": f"Sending posting instructions to local agent for {user_name}'s event."}
     print(f"prompt_message: {prompt_message}")
-    
+
     accumulated_response_text = ""
 
     try:
         # Use the local_agent_proxy instead of agent_engine
         for event_idx, event in enumerate(
             local_agent_proxy.stream_query(
-                user_id=agent_session_user_id,
+                user_id=user_id, # Use the user_id derived from agent_session_user_id
                 message=prompt_message,
             )
         ):
             print(f"\n--- Post Event - Local Agent Event {event_idx} Received ---") # Console
             pprint.pprint(event) # Console
             try:
-                content = event.get('content', {})
-                parts = content.get('parts', [])
+                # --- MODIFIED: Handle 'content' being a list or a dict ---
+                content_data = event.get('content') # Get content, could be dict or list
+
+                parts = []
+                if isinstance(content_data, dict):
+                    parts = content_data.get('parts', [])
+                elif isinstance(content_data, list):
+                    # If 'content' itself is the list of parts, use it directly
+                    parts = content_data
+                elif content_data is not None:
+                    # If content_data is not a dict, list, or None, convert it to a single part list
+                    # This catches cases where 'content' is just a string directly
+                    parts = [{"text": str(content_data)}]
+
                 for part_idx, part in enumerate(parts):
                     if isinstance(part, dict):
                         text = part.get('text')
                         if text:
                             yield {"type": "thought", "data": f"Agent: \"{text}\""}
                             accumulated_response_text += text
-                        # We don't expect tool calls here for this simulation
+                        # Handle tool calls and responses if your orchestrator sends them during this phase
+                        function_call = part.get('functionCall')
+                        function_response = part.get('functionResponse')
+
+                        if function_call:
+                            yield {"type": "thought", "data": f"Agent is considering using a tool for posting: {function_call.get('name', 'Unnamed tool')}."}
+                        if function_response:
+                            yield {"type": "thought", "data": f"Agent received output from tool '{function_response.get('name', 'Unnamed tool')}' during posting."}
+                    elif isinstance(part, str): # Handle cases where a part is just a string
+                        yield {"type": "thought", "data": f"Agent: \"{part}\""}
+                        accumulated_response_text += part
+                    else:
+                        yield {"type": "thought", "data": f"Warning: Unrecognized part type at event {event_idx}, part {part_idx} during posting: {type(part)} - {part}"}
             except Exception as e_inner:
-                yield {"type": "thought", "data": f"Error processing agent event part {event_idx} during posting: {str(e_inner)}"}
+                yield {"type": "thought", "data": f"Error processing agent event part {event_idx} during posting: {str(e_inner)} - Raw Event: {event}"}
 
     except Exception as e_outer:
         yield {"type": "thought", "data": f"Critical error during local agent stream query for posting: {str(e_outer)}"}

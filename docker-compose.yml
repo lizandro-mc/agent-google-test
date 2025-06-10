@@ -9,9 +9,11 @@ services:
       POSTGRES_PASSWORD: mypassword
       POSTGRES_DB: graphdb
     ports:
-      - "5432:5432"
+      - '5432:5432'
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    networks:
+      - app_network
 
   web:
     build:
@@ -20,7 +22,7 @@ services:
     container_name: web_app
     restart: always
     ports:
-      - "8080:8080"
+      - '8080:8080'
     environment:
       POSTGRES_DB: graphdb
       POSTGRES_USER: myuser
@@ -34,6 +36,8 @@ services:
       - postgres
     volumes:
       - ./web:/app
+    networks:
+      - app_network
 
   mcp_server:
     build:
@@ -42,91 +46,98 @@ services:
     container_name: mcp_server
     restart: always
     ports:
-      - "8081:8080" 
+      - '8081:8080'
     environment:
       APP_HOST: 0.0.0.0
       APP_PORT: 8080
-      INSTAVIBE_BASE_URL: http://web:8080/api 
+      INSTAVIBE_BASE_URL: http://web:8080/api
     depends_on:
       - web
     volumes:
       - ./mcp_server:/app
-
+    networks:
+      - app_network
   social:
     build:
       context: .
-      dockerfile: ./agents/social/Dockerfile 
+      dockerfile: ./agents/social/Dockerfile
     container_name: social-agent
     restart: always
     ports:
-      - "10001:10001"
-      - "8084:8080" 
+      - '10001:10001'
+      - '8084:8080'
     environment:
       POSTGRES_DB: graphdb
       POSTGRES_USER: myuser
       POSTGRES_PASSWORD: mypassword
       POSTGRES_HOST: postgres
       POSTGRES_PORT: 5432
-      A2A_SERVER_HOST: "0.0.0.0" 
-      A2A_SERVER_PORT: "10001" 
-      APP_PORT: "10001" 
-      PUBLIC_URL: "http://social:10001" 
+      A2A_SERVER_HOST: '0.0.0.0'
+      A2A_SERVER_PORT: '10001'
+      APP_PORT: '10001'
+      PUBLIC_URL: 'http://social:10001'
     depends_on:
       - postgres
     volumes:
       - ./agents:/app/agents
+    networks:
+      - app_network
 
   platform_mcp_client:
     build:
       context: .
-      dockerfile: ./agents/platform_mcp_client/Dockerfile 
+      dockerfile: ./agents/platform_mcp_client/Dockerfile
     container_name: mcp-client-agent
     restart: always
     ports:
-      - "10002:10002"
-      - "8082:8080" 
+      - '10002:10002'
+      - '8082:8080'
     environment:
-      MCP_SERVER_URL: "http://mcp_server:8080/sse" 
-      A2A_SERVER_HOST: "0.0.0.0" 
-      A2A_SERVER_PORT: "10002" 
-      APP_PORT: "10002" 
-      PUBLIC_URL: "http://platform_mcp_client:10002" 
+      MCP_SERVER_URL: 'http://mcp_server:8080/sse'
+      A2A_SERVER_HOST: '0.0.0.0'
+      A2A_SERVER_PORT: '10002'
+      APP_PORT: '10002'
+      PUBLIC_URL: 'http://platform_mcp_client:10002'
     depends_on:
       - mcp_server
-      - web 
+      - web
     volumes:
       - ./agents:/app/agents
+    networks:
+      - app_network
 
   planner:
     build:
       context: .
-      dockerfile: ./agents/planner/Dockerfile 
+      dockerfile: ./agents/planner/Dockerfile
     container_name: planner-agent
     restart: always
     ports:
-      - "10003:10003"
-      - "8083:8080" 
+      - '10003:10003'
+      - '8083:8080'
     environment:
-      A2A_SERVER_HOST: "0.0.0.0" 
-      A2A_SERVER_PORT: "10003" 
-      APP_PORT: "10003" 
-      PUBLIC_URL: "http://planner:10003" 
+      A2A_SERVER_HOST: '0.0.0.0'
+      A2A_SERVER_PORT: '10003'
+      APP_PORT: '10003'
+      PUBLIC_URL: 'http://planner:10003'
     volumes:
       - ./agents:/app/agents
+    networks:
+      - app_network
 
   orchestrate:
     build:
-      context: . 
-      dockerfile: ./agents/orchestrate/Dockerfile  # You would need to create this Dockerfile
+      context: .
+      dockerfile: ./agents/orchestrate/Dockerfile # You would need to create this Dockerfile
     container_name: orchestrate_agent
     ports:
-      - "10000:10000" 
-      - "8001:8000"
+      - '10000:10000'
+      - '8001:8000'
     environment:
-      REMOTE_AGENT_ADDRESSES: "http://planner:10003,http://platform_mcp_client:10002,http://social:10001"
-      A2A_SERVER_HOST: "0.0.0.0"
-      A2A_SERVER_PORT: "10000" # Example port
-      PUBLIC_URL: "http://orchestrate:10000" 
+      REMOTE_AGENT_ADDRESSES: 'http://planner:10003,http://platform_mcp_client:10002,http://social:10001'
+      A2A_SERVER_HOST: '0.0.0.0'
+      A2A_SERVER_PORT: '10000' # Example port
+      PUBLIC_URL: 'http://orchestrate:10000'
     depends_on:
       # orchestrate depends on these agents to be running
       - planner
@@ -134,29 +145,39 @@ services:
       - social
     volumes:
       - ./agents:/app/agents
+    networks:
+      - app_network
 
   adk_platform:
     build:
-      context: . 
-      dockerfile: Dockerfile.adk_web 
+      context: .
+      dockerfile: Dockerfile.adk_web
     container_name: adk-platform
     restart: always
     ports:
-      - "8000:8000"
+      - '8000:8000'
     environment:
-      ADK_PLATFORM_MCP_AGENT_URL: "http://platform_mcp_client::10002"
-      ADK_PLANNER_AGENT_URL: "http://planner:10003"
-      ADK_SOCIAL_AGENT_URL: "http://social:10001"
-      ADK_ORCHESTRATOR_AGENT_URL: "http://orchestrate:10000"
-      PYTHONPATH: "/app" 
-      ADK_APP_NAME: "orchestrator" 
+      ADK_PLATFORM_MCP_AGENT_URL: 'http://platform_mcp_client::10002'
+      ADK_PLANNER_AGENT_URL: 'http://planner:10003'
+      ADK_SOCIAL_AGENT_URL: 'http://social:10001'
+      ADK_ORCHESTRATOR_AGENT_URL: 'http://orchestrate:10000'
+      ORCHESTRATOR_AGENT_URL: 'http://orchestrate:8000'
+      ORCHESTRATOR_BASE_URL: "http://adk_platform:8000"
+      PYTHONPATH: '/app'
+      ADK_APP_NAME: 'orchestrator'
     volumes:
-      - ./agents:/app 
+      - ./agents:/app
     depends_on:
-      - platform_mcp_client 
+      - platform_mcp_client
       - planner
       - social
       - orchestrate
+    networks:
+      - app_network
+
+networks:
+  app_network:
+    driver: bridge
 
 volumes:
   postgres_data:
